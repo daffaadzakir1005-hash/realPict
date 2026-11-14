@@ -23,6 +23,9 @@ RUN a2dismod mpm_event mpm_worker || true && \
     a2enmod mpm_prefork && \
     a2enmod rewrite
 
+# Fail the build if more than one MPM is enabled
+RUN test "$(ls /etc/apache2/mods-enabled/ | grep -c '^mpm_')" = "1" && test -e /etc/apache2/mods-enabled/mpm_prefork.load
+
 # Set working directory
 WORKDIR /var/www/html
 
@@ -57,4 +60,7 @@ RUN echo '<Directory /var/www/html>\n\
 
 EXPOSE 80
 
-CMD ["apache2-foreground"]
+# Start script: remove any extra MPM symlinks at runtime, verify exactly one MPM, then start Apache
+RUN printf '%s\n' '#!/bin/sh' 'set -e' 'rm -f /etc/apache2/mods-enabled/mpm_event.load /etc/apache2/mods-enabled/mpm_event.conf /etc/apache2/mods-enabled/mpm_worker.load /etc/apache2/mods-enabled/mpm_worker.conf' 'test "$(ls /etc/apache2/mods-enabled/ | grep -c "^mpm_")" = "1" || { echo "multiple MPMs enabled" >&2; exit 1; }' 'exec apache2-foreground' > /usr/local/bin/start-apache.sh && chmod +x /usr/local/bin/start-apache.sh
+
+CMD ["/usr/local/bin/start-apache.sh"]
