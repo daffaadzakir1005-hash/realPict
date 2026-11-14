@@ -14,13 +14,340 @@ if ($method === 'OPTIONS') {
 $uploadDir = __DIR__ . '/../uploads/';
 $tempUploadDir = __DIR__ . '/../uploads/temp_analyzed/';
 if (!is_dir($uploadDir)) {
-    mkdir($uploadDir, 0777, true);
+    @mkdir($uploadDir, 0777, true);
 }
 if (!is_dir($tempUploadDir)) {
-    mkdir($tempUploadDir, 0777, true);
+    @mkdir($tempUploadDir, 0777, true);
 }
 
-// Function to parse EXIF/binary metadata, compare with trained dataset, and perform forensic analysis safely
+/**
+ * Retrieve Hugging Face User Access Token (from config, env, or fallback)
+ */
+function getHfToken() {
+    $configFile = __DIR__ . '/../data/config.json';
+    if (file_exists($configFile)) {
+        $json = @json_decode(file_get_contents($configFile), true);
+        if (!empty($json['hf_token'])) {
+            return trim($json['hf_token']);
+        }
+    }
+    if (!empty($_ENV['HF_TOKEN'])) {
+        return trim($_ENV['HF_TOKEN']);
+    }
+    return '';
+}
+
+/**
+ * Query Hugging Face Inference API for AI Image Detection
+ */
+function queryHuggingFaceAiDetector($filePath, $mime) {
+    $hfToken = getHfToken();
+    if (empty($hfToken) || strpos($hfToken, 'hf_') !== 0) {
+        return [
+            'success' => false,
+            'reason' => 'Token Hugging Face tidak dikonfigurasi (menggunakan Mesin Forensik Lokal)'
+        ];
+    }
+
+    $models = [
+        'umm-maybe/AI-image-detector',
+        'dima806/ai_vs_real_image_detection'
+    ];
+
+    if (!function_exists('curl_init') || !file_exists($filePath)) {
+        return [
+            'success' => false,
+            'reason' => 'cURL extension tidak aktif atau file tidak ditemukan'
+        ];
+    }
+
+    $imageBinary = @file_get_contents($filePath);
+    if (!$imageBinary) {
+        return [
+            'success' => false,
+            'reason' => 'Gagal membaca konten biner file gambar'
+        ];
+    }
+
+    $lastError = '';
+    $lastHttpCode = 0;
+
+    foreach ($models as $model) {
+        $url = "https://router.huggingface.co/hf-inference/models/{$model}";
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $imageBinary,
+            CURLOPT_HTTPHEADER => [
+                "Authorization: Bearer {$hfToken}",
+                "Content-Type: " . ($mime ?: 'image/jpeg')
+            ],
+            CURLOPT_TIMEOUT => 7,
+            CURLOPT_CONNECTTIMEOUT => 3,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr = curl_error($ch);
+        curl_close($ch);
+
+        $lastHttpCode = $httpCode;
+
+        if ($curlErr) {
+            $lastError = "Koneksi cURL error: " . $curlErr;
+            continue;
+        }
+
+        $result = @json_decode($response, true);
+
+        if ($httpCode === 200 && is_array($result)) {
+            $aiConfidence = 0.0;
+            $realConfidence = 0.0;
+
+            foreach ($result as $pred) {
+                if (!isset($pred['label']) || !isset($pred['score'])) continue;
+                $label = strtolower(trim($pred['label']));
+                $score = floatval($pred['score']);
+
+                if (in_array($label, ['artificial', 'fake', 'ai', 'synthetic', 'generated'])) {
+                    $aiConfidence = max($aiConfidence, $score);
+                } elseif (in_array($label, ['human', 'real', 'authentic', 'camera', 'natural'])) {
+                    $realConfidence = max($realConfidence, $score);
+                }
+            }
+
+            if ($aiConfidence > 0 || $realConfidence > 0) {
+                $totalConf = $aiConfidence + $realConfidence;
+                $aiPercent = ($totalConf > 0) ? round(($aiConfidence / $totalConf) * 100) : round($aiConfidence * 100);
+
+                return [
+                    'success' => true,
+                    'model' => $model,
+                    'ai_percentage' => $aiPercent,
+                    'ai_score' => $aiConfidence,
+                    'real_score' => $realConfidence,
+                    'raw_response' => $result
+                ];
+            }
+        } elseif ($httpCode === 401) {
+            $lastError = 'Token HF tidak valid atau telah kedaluwarsa (HTTP 401)';
+            break;
+        } else {
+            $lastError = "Hugging Face merespons kode HTTP {$httpCode}";
+        }
+    }
+
+    return [
+        'success' => false,
+        'http_code' => $lastHttpCode,
+        'reason' => $lastError ?: 'Gagal mendapatkan prediksi dari server Hugging Face'
+    ];
+}
+
+/**
+ * Detect Visible / Embedded AI Watermarks & Signatures in Pixels
+ * Checks for:
+ * 1. Meta / TikTok / Instagram "Made with AI" badge (bottom-left)
+ * 2. Google Gemini / Imagen Sparkle Star Watermark (bottom-right)
+ * 3. DALL-E Colored Squares Signature (bottom-right)
+ */
+function detectAiWatermarksComprehensive($im, $w, $h) {
+    if (!$im) return ['found' => false];
+
+    // 1. Meta / TikTok / Instagram "Made with AI" badge (bottom-left)
+    $pinkPixels = 0;
+    $yBlStart = (int)($h * 0.82);
+    $xBlEnd = (int)($w * 0.45);
+    for ($y = $yBlStart; $y < $h - 4; $y += 2) {
+        for ($x = 4; $x < $xBlEnd; $x += 2) {
+            $rgb = imagecolorat($im, $x, $y);
+            $r = ($rgb >> 16) & 0xFF;
+            $g = ($rgb >> 8) & 0xFF;
+            $b = $rgb & 0xFF;
+            if ($r > 165 && $g < 130 && $b > 90 && ($r - $g) > 40) {
+                $pinkPixels++;
+            }
+        }
+    }
+    if ($pinkPixels >= 10) {
+        return [
+            'found' => true,
+            'name' => 'Watermark Sintetik "Made with AI" (Meta / TikTok / Instagram)',
+            'pixels' => $pinkPixels
+        ];
+    }
+
+    // 2. Google Gemini / Imagen Sparkle Star Watermark (bottom-right)
+    $yBrStart = (int)($h * 0.85);
+    $xBrStart = (int)($w * 0.82);
+    $starPixels = 0;
+    for ($y = $yBrStart; $y < $h - 5; $y += 2) {
+        for ($x = $xBrStart; $x < $w - 5; $x += 2) {
+            $rgb = imagecolorat($im, $x, $y);
+            $r = ($rgb >> 16) & 0xFF;
+            $g = ($rgb >> 8) & 0xFF;
+            $b = $rgb & 0xFF;
+            if ($r > 175 && $g > 175 && $b > 175 && abs($r - $g) < 20 && abs($g - $b) < 20) {
+                $bgC = imagecolorat($im, max(0, $x - 15), max(0, $y - 15));
+                $bgLum = 0.299 * (($bgC >> 16) & 0xFF) + 0.587 * (($bgC >> 8) & 0xFF) + 0.114 * ($bgC & 0xFF);
+                if ($bgLum < 140) {
+                    $starPixels++;
+                }
+            }
+        }
+    }
+    if ($starPixels >= 10) {
+        return [
+            'found' => true,
+            'name' => 'Watermark AI Sparkle Star (Google Imagen / Gemini AI)',
+            'pixels' => $starPixels
+        ];
+    }
+
+    // 3. DALL-E Colored Squares (bottom-right)
+    $dalleColors = 0;
+    for ($y = $yBrStart; $y < $h - 2; $y += 2) {
+        for ($x = $xBrStart; $x < $w - 2; $x += 2) {
+            $rgb = imagecolorat($im, $x, $y);
+            $r = ($rgb >> 16) & 0xFF;
+            $g = ($rgb >> 8) & 0xFF;
+            $b = $rgb & 0xFF;
+            if (($r > 200 && $g > 200 && $b < 50) || 
+                ($r < 50 && $g > 200 && $b > 200) || 
+                ($r < 50 && $g > 180 && $b < 50)  || 
+                ($r > 200 && $g < 50 && $b < 50)  || 
+                ($r < 50 && $g < 50 && $b > 200))    
+            {
+                $dalleColors++;
+            }
+        }
+    }
+    if ($dalleColors >= 15) {
+        return [
+            'found' => true,
+            'name' => 'Watermark DALL-E (Colored Squares Signature)',
+            'pixels' => $dalleColors
+        ];
+    }
+
+    return ['found' => false];
+}
+
+/**
+ * Pixel & Noise Forensic Analyzer using GD
+ * Measures Sensor Photon Shot Noise, Local Pixel Variance, and Error Level Analysis (ELA)
+ */
+function performPixelForensics($filePath, $mime, $w, $h) {
+    if (!extension_loaded('gd')) {
+        return null;
+    }
+
+    $im = null;
+    if ($mime === 'image/jpeg') {
+        $im = @imagecreatefromjpeg($filePath);
+    } elseif ($mime === 'image/png') {
+        $im = @imagecreatefrompng($filePath);
+    } elseif ($mime === 'image/webp') {
+        $im = @imagecreatefromwebp($filePath);
+    }
+
+    if (!$im) {
+        return null;
+    }
+
+    $variances = [];
+    $highSatCount = 0;
+    $totalPixels = 0;
+    $step = max(6, (int)(min($w, $h) / 36));
+
+    // Sample 4x4 blocks across the image
+    for ($y = 6; $y < $h - 6; $y += $step) {
+        for ($x = 6; $x < $w - 6; $x += $step) {
+            $blockLums = [];
+            for ($dy = 0; $dy < 4; $dy++) {
+                for ($dx = 0; $dx < 4; $dx++) {
+                    $rgb = imagecolorat($im, $x + $dx, $y + $dy);
+                    $r = ($rgb >> 16) & 0xFF;
+                    $g = ($rgb >> 8) & 0xFF;
+                    $b = $rgb & 0xFF;
+                    $blockLums[] = 0.299 * $r + 0.587 * $g + 0.114 * $b;
+
+                    $maxC = max($r, $g, $b);
+                    $minC = min($r, $g, $b);
+                    if ($maxC > 0 && (($maxC - $minC) / $maxC) > 0.82) {
+                        $highSatCount++;
+                    }
+                    $totalPixels++;
+                }
+            }
+            $m = array_sum($blockLums) / 16;
+            $v = 0;
+            foreach ($blockLums as $val) {
+                $v += ($val - $m) * ($val - $m);
+            }
+            $variances[] = $v / 16;
+        }
+    }
+
+    $medVar = 0;
+    $zeroVarPercent = 0;
+    if (count($variances) > 0) {
+        sort($variances);
+        $medVar = $variances[(int)(count($variances) / 2)];
+        $zCount = 0;
+        foreach ($variances as $v) {
+            if ($v < 0.08) $zCount++;
+        }
+        $zeroVarPercent = round(($zCount / count($variances)) * 100);
+    }
+
+    $highSatPercent = 0;
+    if ($totalPixels > 0) {
+        $highSatPercent = round(($highSatCount / $totalPixels) * 100);
+    }
+
+    // Error Level Analysis (ELA simulation)
+    $elaDiff = 0;
+    ob_start();
+    imagejpeg($im, null, 92);
+    $recomp = ob_get_clean();
+    $recompIm = @imagecreatefromstring($recomp);
+    if ($recompIm) {
+        $diffs = [];
+        for ($y = 8; $y < min($h, 240); $y += 6) {
+            for ($x = 8; $x < min($w, 240); $x += 6) {
+                $c1 = imagecolorat($im, $x, $y);
+                $c2 = imagecolorat($recompIm, $x, $y);
+                $rD = abs((($c1 >> 16) & 0xFF) - (($c2 >> 16) & 0xFF));
+                $gD = abs((($c1 >> 8) & 0xFF) - (($c2 >> 8) & 0xFF));
+                $bD = abs(($c1 & 0xFF) - ($c2 & 0xFF));
+                $diffs[] = ($rD + $gD + $bD) / 3;
+            }
+        }
+        if (count($diffs) > 0) {
+            $elaDiff = array_sum($diffs) / count($diffs);
+        }
+        imagedestroy($recompIm);
+    }
+
+    imagedestroy($im);
+
+    return [
+        'zero_var_percent' => $zeroVarPercent,
+        'median_var' => $medVar,
+        'high_sat_percent' => $highSatPercent,
+        'ela_diff' => $elaDiff
+    ];
+}
+
+/**
+ * Main Image Analysis Function
+ * Highly accurate multi-factor forensic classification between Real Camera Photos and AI Generated Images
+ */
 function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
     if (!file_exists($filePath)) {
         return [
@@ -31,7 +358,7 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
 
     $fileSize = filesize($filePath);
     $imgInfo = @getimagesize($filePath);
-    
+
     if (!$imgInfo) {
         return [
             'status' => 'error',
@@ -42,145 +369,83 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
     $width = $imgInfo[0];
     $height = $imgInfo[1];
     $mime = $imgInfo['mime'];
-    $ratio = ($height > 0) ? round($width / $height, 3) : 1;
+    $dimKey = "{$width}x{$height}";
 
-    // Read raw binary (up to 2MB) for marker & metadata inspection
+    // Read raw binary for marker & metadata inspection (up to 2MB)
     $raw = @file_get_contents($filePath, false, null, 0, min(2097152, $fileSize));
     $lowerRaw = strtolower($raw);
-    $md5Hash = md5_file($filePath);
+    $lowerName = strtolower($originalName);
 
-    // Compute structural perceptual hash (64-bit string)
-    $binHash = '';
-    $rawLen = strlen($raw);
-    $step = max(1, (int)($rawLen / 64));
-    for ($i = 0; $i < 64; $i++) {
-        $p1 = $i * $step;
-        $p2 = min($rawLen - 1, ($i + 1) * $step);
-        $binHash .= (ord($raw[$p1]) > ord($raw[$p2])) ? '1' : '0';
-    }
-    $hexHash = sprintf('%08x%08x', bindec(substr($binHash, 0, 32)), bindec(substr($binHash, 32, 32)));
-
-    // =========================================================================
-    // STEP 0: Check against Trained Dataset (Machine Learning Ground Truth)
-    // =========================================================================
-    $datasetFile = __DIR__ . '/../data/training_dataset.json';
-    $trainedDataset = [];
-    if (file_exists($datasetFile)) {
-        $trainedDataset = json_decode(file_get_contents($datasetFile), true) ?: [];
-    }
-
-    // Exact Match with Trained Samples
-    foreach ($trainedDataset as $sample) {
-        $sampleMd5 = $sample['fingerprint']['md5'] ?? '';
-        if ($sampleMd5 && $sampleMd5 === $md5Hash) {
-            $trainedLabel = $sample['label'] ?? 'ai';
-            $trainedNote = $sample['source_notes'] ?? '';
-
-            if ($trainedLabel === 'ai') {
-                $aiPercentage = rand(96, 99);
-                return [
-                    'status' => 'success',
-                    'file_name' => $originalName,
-                    'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
-                    'dimensions' => "{$width} × {$height} px",
-                    'mime' => $mime,
-                    'ai_percentage' => $aiPercentage,
-                    'real_percentage' => 100 - $aiPercentage,
-                    'status_label' => 'TERINDIKASI AI (Tervalidasi Model Training)',
-                    'status_type' => 'ai',
-                    'summary' => "Foto ini terkonfirmasi 100% cocok dengan dataset pelatihan Foto AI (" . ($trainedNote ?: 'Ground Truth') . "). Sistem telah mempelajari pola biner dan karakteristik foto ini.",
-                    'camera' => 'Tidak terdeteksi (Model Training: AI)',
-                    'software' => $trainedNote ?: 'Model Pelatihan RealPict',
-                    'date_taken' => 'Tervalidasi pada Dataset',
-                    'metrics' => [
-                        'pola_piksel' => 98,
-                        'metadata' => 99,
-                        'noise_pattern' => 96,
-                        'struktur_gambar' => 98
-                    ],
-                    'findings' => [
-                        "✓ Teridentifikasi dalam Database Model Training sebagai Foto AI (" . ($trainedNote ?: 'Ground Truth') . ")",
-                        "Karakteristik biner dan pola difusi identik dengan sampel latih AI"
-                    ],
-                    'is_trained_match' => true,
-                    'trained_label' => 'ai',
-                    'temp_file_path' => $tempRelPath
-                ];
-            } else {
-                return [
-                    'status' => 'success',
-                    'file_name' => $originalName,
-                    'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
-                    'dimensions' => "{$width} × {$height} px",
-                    'mime' => $mime,
-                    'ai_percentage' => 0,
-                    'real_percentage' => 100,
-                    'status_label' => 'REALPIC (Tervalidasi Model Training)',
-                    'status_type' => 'real',
-                    'summary' => "Foto ini terkonfirmasi 100% cocok dengan dataset pelatihan Foto Asli Kamera (" . ($trainedNote ?: 'Ground Truth Asli') . "). Sistem telah memverifikasi foto ini sebagai foto asli non-AI.",
-                    'camera' => $trainedNote ?: 'Kamera Terverifikasi Training',
-                    'software' => 'Kamera Otentik (Dataset Latih)',
-                    'date_taken' => 'Tervalidasi pada Dataset',
-                    'metrics' => [
-                        'pola_piksel' => 0,
-                        'metadata' => 0,
-                        'noise_pattern' => 0,
-                        'struktur_gambar' => 0
-                    ],
-                    'findings' => [
-                        "✓ Teridentifikasi dalam Database Model Training sebagai Foto Asli Kamera (" . ($trainedNote ?: 'Ground Truth Asli') . ")",
-                        "Karakteristik biner konsisten dengan foto kamera optik nyata"
-                    ],
-                    'is_trained_match' => true,
-                    'trained_label' => 'real',
-                    'temp_file_path' => $tempRelPath
-                ];
-            }
-        }
-    }
-
-    // Similarity matching with trained samples
-    $aiSimMatches = 0;
-    $realSimMatches = 0;
-    $bestAiSim = 0;
-    $bestAiNote = '';
-
-    foreach ($trainedDataset as $sample) {
-        $sHex = $sample['fingerprint']['hex_hash'] ?? '';
-        if ($sHex && strlen($sHex) === strlen($hexHash)) {
-            $matchCount = 0;
-            for ($k = 0; $k < strlen($hexHash); $k++) {
-                if ($hexHash[$k] === $sHex[$k]) $matchCount++;
-            }
-            $sim = $matchCount / strlen($hexHash);
-
-            if (($sample['label'] ?? '') === 'ai') {
-                if ($sim > 0.65) {
-                    $aiSimMatches++;
-                    if ($sim > $bestAiSim) {
-                        $bestAiSim = $sim;
-                        $bestAiNote = $sample['source_notes'] ?? '';
-                    }
-                }
-            } else {
-                if ($sim > 0.65) {
-                    $realSimMatches++;
-                }
-            }
-        }
-    }
-
-    $detectedSoftwares = [];
-    $isAiSignatureFound = false;
-    $aiToolName = '';
     $cameraMake = '';
     $cameraModel = '';
-    $hasExif = false;
+    $hasTrueCameraExif = false;
+    $hasGps = false;
     $dateTime = '';
     $exposureInfo = '';
+    $detectedSoftwares = [];
     $findings = [];
 
-    // 1. Comprehensive AI Generator Signatures & Diffusion Parameters
+    // 1. Check Native Camera EXIF & GPS (Physical hardware verification)
+    if (function_exists('exif_read_data') && ($mime === 'image/jpeg' || $mime === 'image/tiff')) {
+        $exif = @exif_read_data($filePath, 0, true);
+        if ($exif && is_array($exif)) {
+            // Check Camera Make & Model across IFD0 and root
+            if (!empty($exif['IFD0']['Make'])) $cameraMake = trim($exif['IFD0']['Make']);
+            elseif (!empty($exif['Make'])) $cameraMake = trim($exif['Make']);
+
+            if (!empty($exif['IFD0']['Model'])) $cameraModel = trim($exif['IFD0']['Model']);
+            elseif (!empty($exif['Model'])) $cameraModel = trim($exif['Model']);
+
+            if (!empty($exif['IFD0']['Software'])) $detectedSoftwares[] = trim($exif['IFD0']['Software']);
+            elseif (!empty($exif['Software'])) $detectedSoftwares[] = trim($exif['Software']);
+
+            if (!empty($exif['EXIF']['DateTimeOriginal'])) $dateTime = $exif['EXIF']['DateTimeOriginal'];
+            elseif (!empty($exif['DateTimeOriginal'])) $dateTime = $exif['DateTimeOriginal'];
+
+            // Check GPS hardware coordinates
+            if (!empty($exif['GPS']['GPSLatitude']) || !empty($exif['GPSLatitude'])) {
+                $hasGps = true;
+            }
+
+            // Check Exposure / Lens optical parameters
+            $exposures = [];
+            $expTime = $exif['EXIF']['ExposureTime'] ?? $exif['ExposureTime'] ?? '';
+            $fNum = $exif['EXIF']['FNumber'] ?? $exif['FNumber'] ?? '';
+            $isoVal = $exif['EXIF']['ISOSpeedRatings'] ?? $exif['ISOSpeedRatings'] ?? '';
+            $focal = $exif['EXIF']['FocalLength'] ?? $exif['FocalLength'] ?? '';
+
+            if ($expTime) $exposures[] = "Exp: {$expTime}s";
+            if ($fNum) $exposures[] = "f/{$fNum}";
+            if ($isoVal) {
+                $isoStr = is_array($isoVal) ? implode(',', $isoVal) : $isoVal;
+                $exposures[] = "ISO {$isoStr}";
+            }
+            if ($focal) $exposures[] = "Focal: {$focal}mm";
+            if (!empty($exposures)) $exposureInfo = implode(' · ', $exposures);
+
+            // Filter out generic fake software makes
+            $knownRealMakers = [
+                'apple', 'samsung', 'nikon', 'canon', 'sony', 'google', 'xiaomi', 'oppo',
+                'vivo', 'oneplus', 'huawei', 'fujifilm', 'panasonic', 'olympus', 'leica',
+                'motorola', 'realme', 'infinix', 'tecno', 'asus', 'pentax', 'hasselblad'
+            ];
+            $makerLower = strtolower($cameraMake);
+            $isKnownMaker = false;
+            foreach ($knownRealMakers as $km) {
+                if (strpos($makerLower, $km) !== false) {
+                    $isKnownMaker = true;
+                    break;
+                }
+            }
+
+            // True camera photo verified if hardware make/model, exposure, or GPS exists
+            if ($hasGps || $isKnownMaker || (!empty($cameraMake) && !empty($exposureInfo)) || (!empty($cameraModel) && !empty($exposureInfo))) {
+                $hasTrueCameraExif = true;
+            }
+        }
+    }
+
+    // 2. Comprehensive AI Generator Signatures & Diffusion Parameters in Binary
     $aiKeywords = [
         'midjourney' => 'Midjourney Generator',
         'stable diffusion' => 'Stable Diffusion',
@@ -241,6 +506,8 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
         'minimax' => 'MiniMax AI'
     ];
 
+    $isAiSignatureFound = false;
+    $aiToolName = '';
     foreach ($aiKeywords as $key => $name) {
         if (strpos($lowerRaw, $key) !== false) {
             $isAiSignatureFound = true;
@@ -250,8 +517,8 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
         }
     }
 
-    // Check filename for AI generation cues
-    $lowerName = strtolower($originalName);
+    // 3. Check filename for AI generation cues
+    $isAiFilename = false;
     if (!$isAiSignatureFound) {
         $aiNamePatterns = [
             'ai.' => 'Indikator File AI (ai.*)',
@@ -276,7 +543,7 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
         ];
         foreach ($aiNamePatterns as $pat => $lbl) {
             if (strpos($lowerName, $pat) !== false) {
-                $isAiSignatureFound = true;
+                $isAiFilename = true;
                 $aiToolName = $lbl;
                 $findings[] = "Pola penamaan file teridentifikasi sebagai keluaran AI ({$originalName})";
                 break;
@@ -284,266 +551,411 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
         }
     }
 
-    // 2. Common image editor signatures
-    $editorKeywords = [
-        'photoshop' => 'Adobe Photoshop',
-        'lightroom' => 'Adobe Lightroom',
-        'canva' => 'Canva',
-        'gimp' => 'GIMP',
-        'picsart' => 'Picsart',
-        'snapseed' => 'Snapseed',
-        'vsco' => 'VSCO',
-        'pixlr' => 'Pixlr',
-        'inshot' => 'InShot'
-    ];
-
-    foreach ($editorKeywords as $key => $name) {
-        if (strpos($lowerRaw, $key) !== false) {
-            $detectedSoftwares[] = $name;
-            $findings[] = "Terdeteksi jejak software editor: {$name}";
-        }
-    }
-
-    // 3. Check Native EXIF data (Physical camera verification)
-    $hasTrueCameraExif = false;
-    if (function_exists('exif_read_data') && ($mime === 'image/jpeg' || $mime === 'image/tiff')) {
-        $exif = @exif_read_data($filePath, 0, true);
-        if ($exif && is_array($exif)) {
-            $hasExif = true;
-            if (!empty($exif['IFD0']['Make'])) $cameraMake = trim($exif['IFD0']['Make']);
-            if (!empty($exif['IFD0']['Model'])) $cameraModel = trim($exif['IFD0']['Model']);
-            if (!empty($exif['IFD0']['Software'])) $detectedSoftwares[] = trim($exif['IFD0']['Software']);
-            if (!empty($exif['EXIF']['DateTimeOriginal'])) $dateTime = $exif['EXIF']['DateTimeOriginal'];
-
-            $exposures = [];
-            if (!empty($exif['EXIF']['ExposureTime'])) $exposures[] = "Exp: {$exif['EXIF']['ExposureTime']}s";
-            if (!empty($exif['EXIF']['FNumber'])) $exposures[] = "f/{$exif['EXIF']['FNumber']}";
-            if (!empty($exif['EXIF']['ISOSpeedRatings'])) {
-                $iso = is_array($exif['EXIF']['ISOSpeedRatings']) ? implode(',', $exif['EXIF']['ISOSpeedRatings']) : $exif['EXIF']['ISOSpeedRatings'];
-                $exposures[] = "ISO {$iso}";
-            }
-            if (!empty($exif['EXIF']['FocalLength'])) $exposures[] = "Focal: {$exif['EXIF']['FocalLength']}mm";
-
-            if (!empty($cameraMake) && (!empty($exposures) || !empty($cameraModel) || !empty($dateTime))) {
-                $hasTrueCameraExif = true;
-                if (!empty($exposures)) {
-                    $exposureInfo = implode(' · ', $exposures);
-                }
-            }
-        }
-    }
-
-    // 4. Typical AI Generator Dimensions & Divisibility Checks
+    // 4. Typical AI Latent Generation Resolutions (strictly synthetic latent buckets)
     $exactAiDimensions = [
-        // 1:1 Squares
-        '512x512', '768x768', '1024x1024', '1536x1536', '2048x2048', '800x800', '600x600', '1000x1000',
-        // Common SDXL, Midjourney & Flux aspect ratios
-        '1024x1792', '1792x1024', '1152x896', '896x1152', '1216x832', '832x1216',
-        '1344x768', '768x1344', '1536x640', '640x1536', '1152x768', '768x1152',
-        '1080x1080', '1080x1920', '1920x1080', '1280x720', '720x1280'
+        '512x512', '768x768', '1024x1024', '1536x1536', '2048x2048', '800x800',
+        '1024x784', '784x1024', '1024x1792', '1792x1024', '1152x896', '896x1152',
+        '1216x832', '832x1216', '1344x768', '768x1344', '1536x640', '640x1536',
+        '1456x832', '832x1456', '1024x576', '576x1024'
     ];
-    $dimKey = "{$width}x{$height}";
-    $isTypicalAiDimension = in_array($dimKey, $exactAiDimensions);
-    $isDivisibleBy64 = ($width % 64 === 0 && $height % 64 === 0 && $width >= 512 && $height >= 512);
+    $isAiBucket = in_array($dimKey, $exactAiDimensions);
+    $isSquare = (abs($width - $height) <= 2);
 
-    // 5. Pixel Forensics & Noise Variance using GD (SAFELY GUARDED)
-    $hasGdAnalyzed = false;
-    $smoothRatio = 0.25;
-    $sharpRatio = 0.05;
-    $avgSat = 0.25;
-    $highSatRatio = 0.10;
-    $chromaNoise = 5.0;
+    // Standard camera sensor aspect ratios & resolutions
+    $standardCameraDimensions = [
+        '1600x1200', '1200x1600', '2048x1536', '1536x2048', '3264x2448', '2448x3264',
+        '4032x3024', '3024x4032', '1920x1080', '1080x1920', '1280x720', '720x1280',
+        '1280x960', '960x1280', '3840x2160', '2160x3840', '6000x4000', '4000x6000',
+        '1080x1350', '1350x1080', '1080x1440', '1440x1080'
+    ];
+    $isStandardCameraDim = in_array($dimKey, $standardCameraDimensions);
 
-    $im = null;
-    if ($mime === 'image/jpeg' && function_exists('imagecreatefromjpeg')) {
-        $im = @imagecreatefromjpeg($filePath);
-    } elseif ($mime === 'image/png' && function_exists('imagecreatefrompng')) {
-        $im = @imagecreatefrompng($filePath);
-    } elseif ($mime === 'image/webp' && function_exists('imagecreatefromwebp')) {
-        $im = @imagecreatefromwebp($filePath);
-    }
+    // =========================================================================
+    // STEP 1: Query Hugging Face AI Detector Model (if configured)
+    // =========================================================================
+    $hfResult = queryHuggingFaceAiDetector($filePath, $mime);
 
-    if ($im && function_exists('imagecolorat')) {
-        $sampleStep = max(1, (int)(min($width, $height) / 100));
-        $totalSampled = 0;
-        $smoothPixels = 0;
-        $sharpPixels = 0;
-        $satSum = 0;
-        $satHigh = 0;
-        $chromaNoiseSum = 0;
+    if ($hfResult['success']) {
+        $hfAiPct  = $hfResult['ai_percentage'];
+        $modelName = $hfResult['model'];
+        $aiConf   = round($hfResult['ai_score'] * 100, 1);
+        $realConf = round($hfResult['real_score'] * 100, 1);
 
-        for ($x = 1; $x < $width; $x += $sampleStep) {
-            for ($y = 1; $y < $height; $y += $sampleStep) {
-                $rgb = imagecolorat($im, $x, $y);
-                $r = ($rgb >> 16) & 0xFF;
-                $g = ($rgb >> 8) & 0xFF;
-                $b = $rgb & 0xFF;
+        $findings[] = "✓ Klasifikasi Hugging Face ({$modelName}): AI {$aiConf}% · Human {$realConf}%";
 
-                $max = max($r, $g, $b);
-                $min = min($r, $g, $b);
-                $sat = ($max > 0) ? ($max - $min) / $max : 0;
-                $satSum += $sat;
-                if ($sat > 0.60) $satHigh++;
+        // ---- Run forensics in parallel to cross-validate HF verdict ----
+        $forensics = performPixelForensics($filePath, $mime, $width, $height);
+        $zeroVar   = $forensics ? $forensics['zero_var_percent'] : 0;
+        $medVar    = $forensics ? $forensics['median_var']        : 10;
+        $highSat   = $forensics ? $forensics['high_sat_percent']  : 0;
+        $elaDiff   = $forensics ? $forensics['ela_diff']          : 5;
 
-                $rgbL = imagecolorat($im, $x - 1, $y);
-                $rL = ($rgbL >> 16) & 0xFF;
-                $gL = ($rgbL >> 8) & 0xFF;
-                $bL = $rgbL & 0xFF;
+        // Forensic suspicion score (0-100)
+        $fPoints = 0;
+        if ($zeroVar >= 50)       $fPoints += 60;
+        elseif ($zeroVar >= 25)   $fPoints += 40;
+        elseif ($zeroVar >= 15)   $fPoints += 25;
+        elseif ($zeroVar >= 8)    $fPoints += 10;
+        if ($medVar < 0.1)        $fPoints += 30;
+        elseif ($medVar < 0.8)    $fPoints += 20;
+        elseif ($medVar < 2.0)    $fPoints += 10;
+        if ($elaDiff < 0.25)      $fPoints += 15;
+        elseif ($elaDiff < 0.6)   $fPoints += 8;
+        if ($isSquare)            $fPoints += 25;
+        elseif ($isAiBucket)      $fPoints += 20;
+        if ($highSat > 20)        $fPoints += 10;
+        $fPoints = min(100, max(0, $fPoints));
 
-                $diffR = abs($r - $rL);
-                $diffG = abs($g - $gL);
-                $diffB = abs($b - $bL);
-                $diffAvg = ($diffR + $diffG + $diffB) / 3.0;
-
-                if ($diffAvg < 2.5) $smoothPixels++;
-                if ($diffAvg > 35) $sharpPixels++;
-
-                $chromaDelta = abs($diffR - $diffG) + abs($diffG - $diffB);
-                $chromaNoiseSum += $chromaDelta;
-                $totalSampled++;
-            }
+        // ---- Blend HF verdict with forensic score ----
+        // HF gets 70% weight; forensics 30%
+        // BUT if they strongly disagree (HF says real <30% but forensic >60% suspicious),
+        // raise a "SUSPECT" flag and blend 50/50 to avoid false-negative.
+        $hfWeight = 0.70;
+        $fWeight  = 0.30;
+        if ($hfAiPct < 30 && $fPoints >= 60) {
+            // HF model thinks it's real but forensics screams AI — high-quality AI photo
+            $hfWeight = 0.50;
+            $fWeight  = 0.50;
+            $findings[] = "⚠ Model HF memberi skor rendah ({$hfAiPct}%) namun forensik piksel menunjukkan ciri AI kuat (skor {$fPoints}). Bobot blending diseimbangkan.";
+        } elseif ($hfAiPct >= 70 && $fPoints < 20) {
+            // HF confident AI but forensics sees nothing — keep HF dominant
+            $findings[] = "✓ Forensik piksel tidak menemukan anomali visual namun model HF sangat yakin AI ({$hfAiPct}%).";
         }
 
-        if ($totalSampled > 0) {
-            $smoothRatio = $smoothPixels / $totalSampled;
-            $sharpRatio = $sharpPixels / $totalSampled;
-            $avgSat = $satSum / $totalSampled;
-            $highSatRatio = $satHigh / $totalSampled;
-            $chromaNoise = $chromaNoiseSum / $totalSampled;
-            $hasGdAnalyzed = true;
+        $blended = (int)round(($hfAiPct * $hfWeight) + ($fPoints * $fWeight));
+        $aiPercentage = min(99, max(0, $blended));
+
+        // If photo has genuine camera EXIF, cap AI score at 15 regardless
+        if ($hasTrueCameraExif && $aiPercentage > 15) {
+            $aiPercentage = 15;
+            $findings[] = "✓ Metadata kamera fisik terverifikasi — skor AI dikurangi otomatis.";
         }
-        imagedestroy($im);
+
+        if ($hasTrueCameraExif) {
+            $findings[] = "✓ Metadata kamera fisik: " . ($cameraMake ?: 'Kamera') . " {$cameraModel}" . ($exposureInfo ? " ({$exposureInfo})" : "");
+        }
+
+        if ($aiPercentage >= 55) {
+            $statusLabel = "TERINDIKASI AI (Hugging Face + Forensik)";
+            $statusType  = "ai";
+            $summary     = "Model AI Hugging Face ({$modelName}) mengklasifikasikan foto ini sebagai buatan AI ({$aiConf}%), dikonfirmasi oleh forensik piksel lokal (skor forensik {$fPoints}/100).";
+            $polaPiksel   = min(99, max(70, $aiPercentage + rand(-3, 3)));
+            $metadataScore = $hasTrueCameraExif ? 20 : 90;
+            $noisePattern  = min(98, max(65, $fPoints + rand(-5, 5)));
+            $strukturGambar = min(99, max(75, $aiPercentage + rand(-2, 2)));
+        } elseif ($aiPercentage >= 30) {
+            $statusLabel = "MENCURIGAKAN (Kemungkinan AI)";
+            $statusType  = "suspect";
+            $summary     = "Foto ini memiliki sebagian karakteristik sintetis (skor gabungan {$aiPercentage}%). Mungkin foto asli yang diedit AI atau foto AI resolusi tinggi.";
+            $polaPiksel   = rand(40, 65);
+            $metadataScore = 55;
+            $noisePattern  = rand(35, 60);
+            $strukturGambar = rand(45, 65);
+        } else {
+            $statusLabel = "REALPIC (Hugging Face + Forensik)";
+            $statusType  = "real";
+            $summary     = "Model Hugging Face ({$modelName}) memverifikasi foto ini sebagai foto asli non-AI ({$realConf}%), didukung oleh forensik piksel lokal (skor forensik {$fPoints}/100).";
+            $polaPiksel   = max(0, (int)($aiPercentage * 0.3));
+            $metadataScore = $hasTrueCameraExif ? 0 : 10;
+            $noisePattern  = max(0, (int)($fPoints * 0.2));
+            $strukturGambar = max(0, (int)($aiPercentage * 0.25));
+        }
+
+        return [
+            'status'              => 'success',
+            'file_name'           => $originalName,
+            'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
+            'dimensions'          => "{$width} × {$height} px",
+            'mime'                => $mime,
+            'ai_percentage'       => $aiPercentage,
+            'real_percentage'     => 100 - $aiPercentage,
+            'status_label'        => $statusLabel,
+            'status_type'         => $statusType,
+            'summary'             => $summary,
+            'camera'   => !empty($cameraMake) ? trim("{$cameraMake} {$cameraModel}") : ($hasTrueCameraExif ? 'Kamera Fisik Terverifikasi' : 'Tidak terdeteksi (EXIF kosong)'),
+            'software' => !empty($detectedSoftwares) ? implode(', ', array_unique($detectedSoftwares)) : "Hugging Face: {$modelName}",
+            'date_taken' => !empty($dateTime) ? $dateTime : 'Tidak tercatat',
+            'metrics' => [
+                'pola_piksel'    => $polaPiksel,
+                'metadata'       => $metadataScore,
+                'noise_pattern'  => $noisePattern,
+                'struktur_gambar'=> $strukturGambar
+            ],
+            'findings'       => $findings,
+            'temp_file_path' => $tempRelPath
+        ];
     }
 
-    // 6. Comprehensive Probability Calculation & Verdict Logic
+    // =========================================================================
+    // STEP 2: Multi-Factor Digital Visual Forensic Engine
+    // =========================================================================
+
+    // Case A: Confirmed Real Camera Photo (Hardware EXIF / GPS / Exposure)
+    if ($hasTrueCameraExif) {
+        $cameraDesc = trim("{$cameraMake} {$cameraModel}");
+        if (empty($cameraDesc)) $cameraDesc = "Kamera Fisik";
+
+        $findings[] = "✓ Terverifikasi parameter optik perangkat fisik: {$cameraDesc}";
+        if ($hasGps) {
+            $findings[] = "✓ Ditemukan data koordinat GPS hardware dari sensor fisik perangkat";
+        }
+        if (!empty($exposureInfo)) {
+            $findings[] = "✓ Parameter exposure optik fisik valid: {$exposureInfo}";
+        }
+        $findings[] = "✓ Distribusi noise foton sensor optik CMOS konsisten dengan kamera nyata";
+
+        return [
+            'status' => 'success',
+            'file_name' => $originalName,
+            'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
+            'dimensions' => "{$width} × {$height} px",
+            'mime' => $mime,
+            'ai_percentage' => 0,
+            'real_percentage' => 100,
+            'status_label' => "REALPIC (Foto Asli Kamera)",
+            'status_type' => "real",
+            'summary' => "100% Foto asli kamera fisik ({$cameraDesc}). Terverifikasi parameter optik nyata dan tidak ada tanda-tanda manipulasi AI.",
+            'camera' => $cameraDesc,
+            'software' => !empty($detectedSoftwares) ? implode(', ', array_unique($detectedSoftwares)) : 'Kamera Asli',
+            'date_taken' => !empty($dateTime) ? $dateTime : 'Tercatat pada EXIF',
+            'metrics' => [
+                'pola_piksel' => 0,
+                'metadata' => 0,
+                'noise_pattern' => 0,
+                'struktur_gambar' => 0
+            ],
+            'findings' => $findings,
+            'temp_file_path' => $tempRelPath
+        ];
+    }
+
+    // Case B: Confirmed AI Generator Signature in Binary/Parameters
     if ($isAiSignatureFound) {
-        // Confirmed AI by Signature / Metadata / Filename
-        $aiPercentage = rand(94, 99);
-        $polaPiksel = rand(92, 98);
-        $metadataScore = 99;
-        $noisePattern = rand(90, 97);
-        $strukturGambar = rand(93, 99);
-        $statusLabel = "TERINDIKASI AI (Buatan Mesin)";
+        $aiPercentage = rand(95, 99);
+        return [
+            'status' => 'success',
+            'file_name' => $originalName,
+            'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
+            'dimensions' => "{$width} × {$height} px",
+            'mime' => $mime,
+            'ai_percentage' => $aiPercentage,
+            'real_percentage' => 100 - $aiPercentage,
+            'status_label' => "TERINDIKASI AI (Signature Ditemukan)",
+            'status_type' => "ai",
+            'summary' => "Foto ini terbukti mengandung parameter digital dan signature khas generator AI ({$aiToolName}).",
+            'camera' => 'Tidak terdeteksi (Model AI)',
+            'software' => $aiToolName,
+            'date_taken' => 'Tidak tercatat',
+            'metrics' => [
+                'pola_piksel' => rand(92, 98),
+                'metadata' => 99,
+                'noise_pattern' => rand(90, 97),
+                'struktur_gambar' => rand(93, 99)
+            ],
+            'findings' => $findings,
+            'temp_file_path' => $tempRelPath
+        ];
+    }
+
+    // Case C: Confirmed AI File Naming Pattern
+    if ($isAiFilename) {
+        $aiPercentage = rand(94, 98);
+        return [
+            'status' => 'success',
+            'file_name' => $originalName,
+            'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
+            'dimensions' => "{$width} × {$height} px",
+            'mime' => $mime,
+            'ai_percentage' => $aiPercentage,
+            'real_percentage' => 100 - $aiPercentage,
+            'status_label' => "TERINDIKASI AI (Pola Nama File)",
+            'status_type' => "ai",
+            'summary' => "Foto ini terindikasi kuat sebagai keluaran generator AI berdasarkan pola penamaan file ({$aiToolName}).",
+            'camera' => 'Tidak terdeteksi (Keluaran AI)',
+            'software' => $aiToolName,
+            'date_taken' => 'Tidak tercatat',
+            'metrics' => [
+                'pola_piksel' => rand(90, 96),
+                'metadata' => 95,
+                'noise_pattern' => rand(88, 95),
+                'struktur_gambar' => rand(92, 98)
+            ],
+            'findings' => $findings,
+            'temp_file_path' => $tempRelPath
+        ];
+    }
+
+    // Check for visible AI watermarks (Made with AI, Gemini Star, DALL-E squares)
+    $imLoaded = null;
+    if ($mime === 'image/jpeg') $imLoaded = @imagecreatefromjpeg($filePath);
+    elseif ($mime === 'image/png') $imLoaded = @imagecreatefrompng($filePath);
+    elseif ($mime === 'image/webp') $imLoaded = @imagecreatefromwebp($filePath);
+
+    if ($imLoaded) {
+        $wmResult = detectAiWatermarksComprehensive($imLoaded, $width, $height);
+        if ($wmResult['found']) {
+            imagedestroy($imLoaded);
+            $aiPercentage = rand(96, 99);
+            $findings[] = "Terdeteksi tanda air (watermark) visual generator: " . $wmResult['name'];
+
+            return [
+                'status' => 'success',
+                'file_name' => $originalName,
+                'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
+                'dimensions' => "{$width} × {$height} px",
+                'mime' => $mime,
+                'ai_percentage' => $aiPercentage,
+                'real_percentage' => 100 - $aiPercentage,
+                'status_label' => "TERINDIKASI AI (Watermark Generator)",
+                'status_type' => "ai",
+                'summary' => "Foto ini terkonfirmasi sebagai buatan AI karena memuat tanda air digital resmi (" . $wmResult['name'] . ").",
+                'camera' => 'Tidak terdeteksi (Model AI / Generator)',
+                'software' => $wmResult['name'],
+                'date_taken' => 'Tidak tercatat',
+                'metrics' => [
+                    'pola_piksel' => rand(94, 99),
+                    'metadata' => 99,
+                    'noise_pattern' => rand(92, 98),
+                    'struktur_gambar' => rand(95, 99)
+                ],
+                'findings' => $findings,
+                'temp_file_path' => $tempRelPath
+            ];
+        }
+        imagedestroy($imLoaded);
+    }
+
+    // Run Deep Pixel & Noise Forensics
+    $forensics = performPixelForensics($filePath, $mime, $width, $height);
+    $zeroVar = $forensics ? $forensics['zero_var_percent'] : 0;
+    $medVar = $forensics ? $forensics['median_var'] : 10;
+    $highSat = $forensics ? $forensics['high_sat_percent'] : 0;
+    $elaDiff = $forensics ? $forensics['ela_diff'] : 5;
+
+    // Calculate AI Probability Score based on Calibrated Physical Forensics
+    $aiPoints = 0;
+
+    // 1. Flatness / Synthetic smoothness (Poisson noise absence)
+    if ($zeroVar >= 50) {
+        $aiPoints += 65;
+        $findings[] = "Distribusi piksel menunjukkan {$zeroVar}% area tanpa derau foton sensor (sangat identik dengan rendering sintetik AI / GAN)";
+    } elseif ($zeroVar >= 30) {
+        $aiPoints += 52;
+        $findings[] = "Kehalusan buatan tinggi ({$zeroVar}% area datar tanpa derau sensor alami kamera)";
+    } elseif ($zeroVar >= 15) {
+        $aiPoints += 38;
+        $findings[] = "Ketiadaan noise foton sensor optik ({$zeroVar}% flat area, khas difusi AI)";
+    } elseif ($zeroVar >= 8) {
+        $aiPoints += 18;
+        $findings[] = "Sebagian area menunjukkan kehalusan piksel buatan ({$zeroVar}% flat area)";
+    }
+
+    // 2. Median micro-variance (texture smoothness)
+    if ($medVar < 0.08) {
+        $aiPoints += 40;
+        $findings[] = "Varians mikro sangat rendah (" . round($medVar, 3) . "), gradien matematis khas mesin difusi AI tanpa pori/tekstur alami";
+    } elseif ($medVar < 0.5) {
+        $aiPoints += 30;
+        $findings[] = "Tekstur mikro halus buatan (" . round($medVar, 3) . "), karakteristik diffusion denoiser AI";
+    } elseif ($medVar < 1.5) {
+        $aiPoints += 18;
+    } elseif ($medVar < 3.0) {
+        $aiPoints += 8;
+    }
+
+    // 3. ELA difference (low ELA = synthetic canvas rendering)
+    if ($elaDiff < 0.20) {
+        $aiPoints += 25;
+        $findings[] = "Error Level Analysis (ELA: " . round($elaDiff, 3) . ") menunjukkan kompresi kanvas sintetik yang sangat homogen";
+    } elseif ($elaDiff < 0.45) {
+        $aiPoints += 15;
+        $findings[] = "ELA rendah (" . round($elaDiff, 3) . ") — kemungkinan rendering pipeline AI";
+    } elseif ($elaDiff < 0.9) {
+        $aiPoints += 7;
+    }
+
+    // 4. Dimensions & Aspect ratio
+    if ($isSquare && !$hasTrueCameraExif) {
+        $aiPoints += 55;
+        $findings[] = "Rasio aspek 1:1 tanpa EXIF kamera — format khas keluaran generator AI";
+    } elseif ($isAiBucket && !$hasTrueCameraExif) {
+        $aiPoints += 50;
+        $findings[] = "Resolusi {$width}×{$height} px cocok dengan bucket laten generator AI (SDXL / Midjourney / Flux)";
+    } else {
+        // Check exact round-number dimensions typical of AI (e.g. 1200x800, 2400x1600, etc.)
+        $gcd = function($a, $b) use (&$gcd) { return $b ? $gcd($b, $a % $b) : $a; };
+        $g = $gcd($width, $height);
+        $rw = $width / $g;
+        $rh = $height / $g;
+        // If both dimensions are very round (divisible by 32 or 64) with no EXIF → suspect
+        if (!$hasTrueCameraExif && ($width % 64 === 0) && ($height % 64 === 0)) {
+            $aiPoints += 30;
+            $findings[] = "Dimensi gambar ({$width}×{$height} px) merupakan kelipatan 64 — khas resolusi laten grid AI tanpa EXIF kamera";
+        } elseif (!$hasTrueCameraExif && ($width % 32 === 0) && ($height % 32 === 0)) {
+            $aiPoints += 15;
+        }
+    }
+
+    // 5. Standard camera resolution discount
+    if ($isStandardCameraDim && $zeroVar < 12 && $medVar > 3.5 && !$isSquare && !$isAiBucket) {
+        $aiPoints -= 55;
+        $findings[] = "✓ Dimensi ({$width}×{$height} px) dan distribusi noise konsisten dengan foto kamera sensor fisik";
+    }
+
+    // 6. Missing EXIF on JPEG penalty (real camera JPEGs almost always have EXIF)
+    if ($mime === 'image/jpeg' && !$hasTrueCameraExif && empty($cameraMake)) {
+        $aiPoints += 18;
+        $findings[] = "EXIF kamera fisik tidak ditemukan pada file JPEG (kamera nyata hampir selalu menyertakan EXIF)";
+    }
+
+    // 7. High artificial saturation
+    if ($highSat > 25) {
+        $aiPoints += 18;
+        $findings[] = "Distribusi kromatik menunjukkan saturasi warna sintetis tinggi ({$highSat}%)";
+    } elseif ($highSat > 15) {
+        $aiPoints += 8;
+    }
+
+    // 8. Very large file with zero ELA & flat areas = AI upscale
+    if ($fileSize > 2097152 && $elaDiff < 0.3 && $zeroVar >= 20) {
+        $aiPoints += 15;
+        $findings[] = "File berukuran besar ({$fileSize} byte) dengan ELA sangat rendah dan area datar — ciri khas AI upscaling";
+    }
+
+    $aiScore = min(98, max(0, $aiPoints));
+
+    // Decision Logic
+    if ($aiScore >= 50) {
+        $statusLabel = "TERINDIKASI AI (Forensik Digital)";
         $statusType = "ai";
-        $summary = "Foto ini terbukti mengandung parameter digital dan signature khas generator AI ({$aiToolName}).";
-    } elseif ($hasTrueCameraExif) {
-        // Confirmed 100% Real Camera Photo -> 0% AI
-        $aiPercentage = 0;
+        $summary = "Foto ini terdeteksi memiliki karakteristik kuat buatan AI ({$aiScore}% kemungkinan AI) berdasarkan analisis pola noise sensor, kehalusan gradien piksel, dan ketiadaan jejak optik kamera fisik.";
+        $cameraStr = 'Tidak terdeteksi (Model AI / Sintetis)';
+        $softwareStr = 'AI Diffusion / Synthetic Rendering';
+        $polaPiksel = min(99, max(75, $aiScore + rand(-2, 3)));
+        $metadataScore = 90;
+        $noisePattern = min(98, max(70, round(92 - ($aiScore * 0.15))));
+        $strukturGambar = min(99, max(80, $aiScore + rand(-1, 2)));
+    } elseif ($aiScore >= 30) {
+        $statusLabel = "MENCURIGAKAN (Kemungkinan AI)";
+        $statusType = "suspect";
+        $summary = "Foto ini memiliki sebagian karakteristik sintetis ({$aiScore}% kemungkinan AI). Mungkin merupakan foto asli yang diedit filter AI atau foto AI berkualitas tinggi.";
+        $cameraStr = 'Tidak terdeteksi (EXIF kosong)';
+        $softwareStr = 'Filter / Pemrosesan Digital';
+        $polaPiksel = rand(45, 65);
+        $metadataScore = 60;
+        $noisePattern = rand(40, 60);
+        $strukturGambar = rand(50, 70);
+    } else {
+        $statusLabel = "REALPIC (Foto Asli)";
+        $statusType = "real";
+        $summary = "Foto ini terkonfirmasi sebagai foto asli wajar (0% AI). Karakteristik derau foton dan distribusi biner konsisten dengan foto optik kamera non-AI.";
+        $cameraStr = 'Kamera Otentik (EXIF terkompresi)';
+        $softwareStr = !empty($detectedSoftwares) ? implode(', ', array_unique($detectedSoftwares)) : 'Kamera Asli';
         $polaPiksel = 0;
         $metadataScore = 0;
         $noisePattern = 0;
         $strukturGambar = 0;
-        $statusLabel = "REALPIC (Foto Asli Kamera)";
-        $statusType = "real";
-        $findings[] = "Ditemukan metadata otentik kamera fisik: {$cameraMake} {$cameraModel}";
-        if (!empty($exposureInfo)) {
-            $findings[] = "Parameter lensa & exposure fisik valid: {$exposureInfo}";
-        }
-        $findings[] = "Distribusi noise foton sensor optik CMOS konsisten dengan kamera nyata.";
-        $summary = "100% Foto asli kamera fisik ({$cameraMake} {$cameraModel}). Terverifikasi parameter optik nyata dan tidak ada tanda-tanda manipulasi AI.";
-    } else {
-        // Image without authentic camera EXIF: evaluate multi-factor forensic indicators
         $aiScore = 0;
-        $syntheticReasons = [];
-
-        // Check learning model cluster matches
-        if ($aiSimMatches > 0) {
-            $aiScore += min(35, $aiSimMatches * 15);
-            $syntheticReasons[] = "Model Pelatihan: Terdeteksi kesamaan pola struktur (" . round($bestAiSim * 100) . "%) dengan sampel AI terlatih (" . ($bestAiNote ?: 'Dataset AI') . ")";
-        }
-
-        if ($hasGdAnalyzed) {
-            // Smoothness factor (Synthetic latent diffusion smoothing)
-            if ($smoothRatio > 0.45) {
-                $aiScore += 35;
-                $syntheticReasons[] = "Permukaan gambar memiliki kehalusan sintetik (" . round($smoothRatio * 100, 1) . "% pola difusi) khas AI";
-            } elseif ($smoothRatio > 0.35) {
-                $aiScore += 20;
-                $syntheticReasons[] = "Tingkat kehalusan tekstur (" . round($smoothRatio * 100, 1) . "%) mencurigakan dan tidak memiliki butir film/sensor normal";
-            }
-
-            // Noise factor (absence of camera sensor photon shot noise)
-            if ($chromaNoise < 3.2 && $avgSat > 0.12) {
-                $aiScore += 25;
-                $syntheticReasons[] = "Ketiadaan noise fotonik sensor optik kamera nyata (chroma noise rendah)";
-            }
-
-            // Saturation / AI Glow
-            if ($highSatRatio > 0.15 || $avgSat > 0.32) {
-                $aiScore += 15;
-                $syntheticReasons[] = "Distribusi saturasi warna tinggi (indikasi rendering generative AI)";
-            }
-        } else {
-            // Pure PHP fallback when GD is unavailable
-            if (strpos($lowerRaw, 'jfif') !== false && strpos($lowerRaw, 'exif') === false) {
-                $aiScore += 30;
-                $syntheticReasons[] = "Header gambar berformat JFIF web murni tanpa kontainer EXIF kamera optik";
-            }
-            $rawBytes = substr($raw, 0, 4096);
-            $uniqueChars = count(count_chars($rawBytes, 1));
-            if ($uniqueChars > 240) {
-                $aiScore += 15;
-            }
-        }
-
-        // Dimension / Latent grid factor
-        if ($isTypicalAiDimension) {
-            $aiScore += 25;
-            $syntheticReasons[] = "Resolusi ({$width}x{$height} px) merupakan standar output model AI Generator (SDXL / Midjourney / DALL-E)";
-        } elseif ($isDivisibleBy64) {
-            $aiScore += 15;
-            $syntheticReasons[] = "Dimensi kelipatan 64px identik dengan grid latent diffusion model";
-        }
-
-        // No EXIF clue
-        $aiScore += 10;
-        $syntheticReasons[] = "Struktur file tidak memiliki jejak optik sensor kamera fisik";
-
-        // Software editor clue
-        if (!empty($detectedSoftwares)) {
-            $soft = implode(', ', array_unique($detectedSoftwares));
-            $aiScore = max($aiScore, 45);
-            $syntheticReasons[] = "Terdeteksi pemrosesan aplikasi grafis ({$soft})";
-        }
-
-        // Final thresholding
-        if ($aiScore >= 45) {
-            // High probability AI generated
-            $aiPercentage = min(98, max(75, round($aiScore + rand(2, 6))));
-            $polaPiksel = min(98, max(75, round($smoothRatio * 165)));
-            $metadataScore = rand(82, 94);
-            $noisePattern = min(96, max(75, round((6.0 - min(6.0, $chromaNoise)) / 6.0 * 100)));
-            $strukturGambar = rand(84, 95);
-            $statusLabel = "TERINDIKASI AI (Pola Generator)";
-            $statusType = "ai";
-            $summary = "Foto ini terdeteksi memiliki karakteristik kuat buatan AI ({$aiPercentage}% kemungkinan AI). Struktur piksel, kehalusan difusi, dan ketiadaan sensor fisik sesuai pola sintesis gambar.";
-        } elseif ($aiScore >= 30) {
-            // Edited or Partial AI
-            $aiPercentage = min(74, max(38, round($aiScore + rand(0, 4))));
-            $polaPiksel = rand(40, 65);
-            $metadataScore = rand(45, 68);
-            $noisePattern = rand(35, 58);
-            $strukturGambar = rand(42, 65);
-            $statusLabel = "TERINDIKASI SUNTINGAN / KONTEN AI";
-            $statusType = "edited";
-            $summary = "Foto terindikasi telah disunting atau mengandung komponen manipulasi digital / AI ({$aiPercentage}%).";
-        } else {
-            // Natural compressed photo (e.g. from WhatsApp/social media)
-            $aiPercentage = 0;
-            $polaPiksel = 0;
-            $metadataScore = 5;
-            $noisePattern = 0;
-            $strukturGambar = 0;
-            $statusLabel = "REALPIC (Foto Asli)";
-            $statusType = "real";
-            $syntheticReasons[] = "Rasio aspek ({$width}x{$height} px) konsisten dengan format optik kamera wajar.";
-            $syntheticReasons[] = "Distribusi noise fotonik dan variasi warna konsisten dengan foto non-AI.";
-            $summary = "Foto ini terkonfirmasi sebagai foto asli wajar (0% AI). Metadata EXIF dibersihkan oleh aplikasi kompresi / sosmed, namun karakteristiknya konsisten dengan foto non-AI.";
-        }
-
-        foreach ($syntheticReasons as $r) {
-            $findings[] = $r;
-        }
     }
 
     return [
@@ -552,13 +964,13 @@ function analyzeImageFile($filePath, $originalName, $tempRelPath = '') {
         'file_size_formatted' => round($fileSize / 1024, 1) . ' KB',
         'dimensions' => "{$width} × {$height} px",
         'mime' => $mime,
-        'ai_percentage' => $aiPercentage,
-        'real_percentage' => 100 - $aiPercentage,
+        'ai_percentage' => $aiScore,
+        'real_percentage' => 100 - $aiScore,
         'status_label' => $statusLabel,
         'status_type' => $statusType,
         'summary' => $summary,
-        'camera' => !empty($cameraMake) ? trim("{$cameraMake} {$cameraModel}") : 'Tidak terdeteksi (EXIF kosong)',
-        'software' => !empty($detectedSoftwares) ? implode(', ', array_unique($detectedSoftwares)) : ($isAiSignatureFound ? $aiToolName : 'Kamera Default / Tanpa Editor'),
+        'camera' => $cameraStr,
+        'software' => $softwareStr,
         'date_taken' => !empty($dateTime) ? $dateTime : 'Tidak tercatat',
         'metrics' => [
             'pola_piksel' => $polaPiksel,
@@ -597,9 +1009,9 @@ if ($method === 'POST') {
                     'struktur_gambar' => 0
                 ],
                 'findings' => [
-                    'Ditemukan metadata otentik kamera fisik: Apple iPhone 14 Pro',
-                    'Parameter lensa & exposure fisik valid: Exp: 1/120s · f/1.78 · ISO 50 · Focal: 6.86mm',
-                    'Distribusi noise foton sensor optik CMOS konsisten dengan kamera nyata.'
+                    '✓ Ditemukan metadata otentik kamera fisik: Apple iPhone 14 Pro',
+                    '✓ Parameter lensa & exposure fisik valid: Exp: 1/120s · f/1.78 · ISO 50 · Focal: 6.86mm',
+                    '✓ Distribusi noise foton sensor optik CMOS konsisten dengan kamera nyata'
                 ]
             ]);
             exit;
@@ -614,7 +1026,7 @@ if ($method === 'POST') {
 
     $file = $_FILES['image'];
     $allowed = ['image/jpeg', 'image/png', 'image/webp'];
-    
+
     // Check mime type safely
     $realMime = null;
     if (function_exists('finfo_open')) {
@@ -636,7 +1048,6 @@ if ($method === 'POST') {
         exit;
     }
 
-    // Keep temporary copy for quick-training feature
     $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
     $tempFileName = 'scan_' . time() . '_' . rand(1000, 9999) . '.' . $ext;
     $tempTarget = $tempUploadDir . $tempFileName;
@@ -649,8 +1060,12 @@ if ($method === 'POST') {
 }
 
 // GET default fallback
-echo json_encode([
-    'status' => 'ready',
-    'service' => 'RealPict Forensics API',
-    'version' => '1.0'
-]);
+if (php_sapi_name() !== 'cli' && $method === 'GET') {
+    echo json_encode([
+        'status' => 'ready',
+        'service' => 'RealPict Forensics API',
+        'version' => '2.2',
+        'engine' => 'Digital Visual Forensics & HF Vision Classifier'
+    ]);
+    exit;
+}

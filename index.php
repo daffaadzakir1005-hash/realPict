@@ -27,7 +27,7 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
                         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                         <path d="M9 12l2 2 4-4"/>
                     </svg>
-                </div>
+                </div> 
                 <span>RealPict</span>
             </a>
 
@@ -47,9 +47,6 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
                 </li>
                 <li class="nav-item">
                     <a class="nav-link <?= $activePage === 'laporan' ? 'active' : '' ?>" data-tab="laporan">Laporan</a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link <?= $activePage === 'training' ? 'active' : '' ?>" data-tab="training">Latih AI</a>
                 </li>
             </ul>
 
@@ -326,29 +323,6 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
                                 <div style="font-size: 0.85rem; font-weight: 700; color: #fff; margin-bottom: 6px;">Catatan Forensik:</div>
                                 <ul id="resultFindingsList" style="padding-left: 18px; margin: 0;"></ul>
                             </div>
-
-                            <!-- Quick Training & Feedback Bar -->
-                            <div class="quick-train-box" style="margin-top: 20px; padding: 16px; background: rgba(15, 18, 24, 0.95); border: 1px solid #1e293b; border-radius: 12px;">
-                                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
-                                    <div>
-                                        <div style="font-size: 0.85rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 6px;">
-                                            <span>🧠</span> Bantu Latih & Tingkatkan Akurasi Model
-                                        </div>
-                                        <div style="font-size: 0.775rem; color: #94a3b8; margin-top: 2px;">
-                                            Hasil kurang pas? Latih sistem secara langsung agar lebih akurat mengenali foto sejenis:
-                                        </div>
-                                    </div>
-                                    <div style="display: flex; gap: 8px;">
-                                        <button type="button" id="btnQuickTrainAi" class="btn" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); padding: 7px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border-radius: 8px;">
-                                            🤖 Latih: Ini Foto AI
-                                        </button>
-                                        <button type="button" id="btnQuickTrainReal" class="btn" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); padding: 7px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border-radius: 8px;">
-                                            📷 Latih: Ini Foto Asli
-                                        </button>
-                                    </div>
-                                </div>
-                                <div id="quickTrainNotice" style="display: none; margin-top: 10px; font-size: 0.8rem; padding: 8px 12px; border-radius: 8px;"></div>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -574,115 +548,6 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
                 </div>
             </div>
         </section>
-
-        <!-- TAB 6: LATIH AI (Training Model) -->
-        <section id="tab-training" class="page-tab <?= $activePage === 'training' ? 'active-tab' : '' ?>" style="padding: 48px 0 64px;">
-            <div class="container">
-                <div class="page-header">
-                    <div class="badge-tag" style="margin-bottom: 12px;">
-                        <span>MACHINE LEARNING · DATASET PELATIHAN</span>
-                    </div>
-                    <h2 class="page-title">Latih Model Deteksi AI</h2>
-                    <p class="page-subtitle">Unggah sampel foto asli atau foto buatan AI untuk melatih sistem RealPict. Semakin banyak contoh yang dilatih, semakin akurat pendeteksi mengenali foto buatan AI maupun foto kamera asli.</p>
-                </div>
-
-                <!-- 4 Statistics Counter Cards -->
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px;">
-                    <div style="background: #0d0f14; border: 1px solid #1c212c; border-radius: 12px; padding: 20px;">
-                        <div style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px;">TOTAL SAMPEL DILATIH</div>
-                        <div id="trnStatTotal" style="font-size: 1.8rem; font-weight: 700; color: #fff;">0</div>
-                    </div>
-                    <div style="background: #0d0f14; border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; padding: 20px;">
-                        <div style="font-size: 0.8rem; color: #f87171; margin-bottom: 6px;">SAMPEL FOTO AI</div>
-                        <div id="trnStatAi" style="font-size: 1.8rem; font-weight: 700; color: #f87171;">0</div>
-                    </div>
-                    <div style="background: #0d0f14; border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 12px; padding: 20px;">
-                        <div style="font-size: 0.8rem; color: #34d399; margin-bottom: 6px;">SAMPEL FOTO ASLI</div>
-                        <div id="trnStatReal" style="font-size: 1.8rem; font-weight: 700; color: #34d399;">0</div>
-                    </div>
-                    <div style="background: #0d0f14; border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 12px; padding: 20px;">
-                        <div style="font-size: 0.8rem; color: #fbbf24; margin-bottom: 6px;">STATUS MODEL</div>
-                        <div style="font-size: 1.1rem; font-weight: 700; color: #fbbf24; margin-top: 6px; display: flex; align-items: center; gap: 8px;">
-                            <span class="status-dot"></span> Adaptif & Aktif
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Training Form Card -->
-                <div style="background: #0d0f14; border: 1px solid #1c212c; border-radius: 16px; padding: 32px; margin-bottom: 36px;">
-                    <h3 style="color: #fff; font-size: 1.2rem; margin-bottom: 8px;">Unggah Sampel Pelatihan Baru</h3>
-                    <p style="color: #94a3b8; font-size: 0.85rem; margin-bottom: 24px;">Pilih label untuk foto yang akan diunggah, lalu sistem akan mengekstrak sidik jari biner dan karakteristik uniknya ke dalam memori model.</p>
-
-                    <form id="formTraining" enctype="multipart/form-data">
-                        <!-- Label Selector (Radio Buttons as Cards) -->
-                        <div style="margin-bottom: 24px;">
-                            <label class="form-label" style="margin-bottom: 10px; display: block;">Tentukan Label Sampel Foto:</label>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                                <label style="display: block; cursor: pointer;">
-                                    <input type="radio" name="trainLabel" value="ai" checked style="display: none;" id="radioLabelAi">
-                                    <div id="cardLabelAi" style="padding: 18px; border-radius: 12px; border: 2px solid #ef4444; background: rgba(239, 68, 68, 0.08); text-align: center; transition: all 0.2s;">
-                                        <div style="font-size: 1.8rem; margin-bottom: 6px;">🤖</div>
-                                        <div style="font-weight: 700; color: #f87171; font-size: 0.95rem;">FOTO AI (Buatan Mesin)</div>
-                                        <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 4px;">Midjourney, Stable Diffusion, DALL-E, Bing, FaceApp, dll.</div>
-                                    </div>
-                                </label>
-                                <label style="display: block; cursor: pointer;">
-                                    <input type="radio" name="trainLabel" value="real" style="display: none;" id="radioLabelReal">
-                                    <div id="cardLabelReal" style="padding: 18px; border-radius: 12px; border: 2px solid #334155; background: #0f1218; text-align: center; transition: all 0.2s;">
-                                        <div style="font-size: 1.8rem; margin-bottom: 6px;">📷</div>
-                                        <div style="font-weight: 700; color: #cbd5e1; font-size: 0.95rem;">FOTO ASLI (Kamera Nyata)</div>
-                                        <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 4px;">Foto asli kamera HP, DSLR, candid, landscape nyata.</div>
-                                    </div>
-                                </label>
-                            </div>
-                        </div>
-
-                        <!-- Source notes input -->
-                        <div class="form-group" style="margin-bottom: 24px;">
-                            <label class="form-label" for="trainSourceNotes">Keterangan Sumber / Nama Model (Opsional)</label>
-                            <input type="text" id="trainSourceNotes" class="form-input" placeholder="Misal: DALL-E 3, Midjourney v6, Kamera iPhone 14, Foto WhatsApp">
-                        </div>
-
-                        <!-- Dropzone for Training Files -->
-                        <div id="trainDropzone" class="dropzone-box" style="margin-bottom: 24px; padding: 36px 20px;">
-                            <div class="dropzone-icon">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                    <polyline points="17 8 12 3 7 8"></polyline>
-                                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                                </svg>
-                            </div>
-                            <div class="dropzone-title" id="trainDropzoneTitle">Pilih satu atau beberapa foto untuk dilatih</div>
-                            <div class="dropzone-sub">
-                                atau <span class="dropzone-link">jelajahi file</span> · JPG, PNG, WEBP (bisa pilih banyak sekaligus)
-                            </div>
-                            <input type="file" id="trainFileInput" class="hidden-input" multiple accept="image/jpeg,image/png,image/webp">
-                        </div>
-
-                        <!-- Selected files preview list -->
-                        <div id="trainFilesSelectedList" style="display: none; margin-bottom: 24px; padding: 12px; background: #0f1218; border-radius: 10px; border: 1px solid #1c212c;"></div>
-
-                        <!-- Submit Button -->
-                        <button type="submit" id="btnSubmitTraining" class="btn btn-primary btn-full" style="padding: 14px; font-weight: 700;">
-                            🧠 Mulai Training & Simpan ke Model
-                        </button>
-                    </form>
-                </div>
-
-                <!-- Trained Dataset History Table -->
-                <div class="reports-history">
-                    <div class="reports-history-title">
-                        <span>Database Sampel yang Telah Dilatih</span>
-                        <button type="button" id="btnRefreshDataset" class="btn btn-secondary" style="padding: 6px 14px; font-size: 0.75rem;">
-                            ↺ Segarkan Data
-                        </button>
-                    </div>
-                    <div id="datasetTableContainer">
-                        <div style="text-align: center; padding: 24px; color: #64748b; font-size: 0.85rem;">Memuat dataset pelatihan...</div>
-                    </div>
-                </div>
-            </div>
-        </section>
     </main>
 
     <!-- ==========================================================================
@@ -693,25 +558,16 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
             <!-- Left: Badge & Slogan -->
             <div class="footer-left">
                 <div class="footer-badge">
-                    <span>◆</span>
-                    <span>REALPICT</span>
+                    <span>⛉</span>
+                    <span>REALPICT-Deteksi Foto Hindari Hoax</span>
                 </div>
-                <div class="footer-slogan">Foto Asli, Dunia Lebih Aman</div>
+                
             </div>
 
-            <!-- Middle: Navigation Links -->
-            <ul class="footer-links">
-                <li><a class="footer-link" data-tab-target="beranda">Beranda</a></li>
-                <li><a class="footer-link" data-tab-target="cek-foto">Cek Foto</a></li>
-                <li><a class="footer-link" data-tab-target="massal">Upload Massal</a></li>
-                <li><a class="footer-link" data-tab-target="edukasi">Edukasi</a></li>
-                <li><a class="footer-link" data-tab-target="laporan">Laporan</a></li>
-                <li><a class="footer-link" data-tab-target="training">Latih AI</a></li>
-            </ul>
-
+            <div class="footer-links">platform berbasis ai untuk deteksi foto</div>
             <!-- Right: Subtitle / Event -->
             <div class="footer-right">
-                Hackathon Kartika 2026 · Prototipe
+                Hackathon Kartika 2026 ·
             </div>
         </div>
     </footer>
@@ -826,21 +682,6 @@ $activePage = isset($_GET['page']) ? htmlspecialchars($_GET['page']) : 'beranda'
                         <div style="margin-top: 14px;">
                             <div style="font-size: 0.8rem; font-weight: 700; color: #fff; margin-bottom: 4px;">Catatan Forensik:</div>
                             <ul id="modalBatchFindings" style="padding-left: 18px; margin: 0;"></ul>
-                        </div>
-
-                        <!-- Quick Training inside Batch Modal -->
-                        <div style="margin-top: 18px; padding: 14px; background: #0b0d12; border: 1px solid #1e293b; border-radius: 10px;">
-                            <div style="font-size: 0.8rem; font-weight: 700; color: #fff; margin-bottom: 4px;">🧠 Latih Model dengan Foto Ini:</div>
-                            <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 10px;">Bantu tingkatkan akurasi pendeteksi dengan menandai status foto ini:</div>
-                            <div style="display: flex; gap: 8px;">
-                                <button type="button" id="btnModalTrainAi" class="btn" style="background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); padding: 6px 12px; font-size: 0.75rem; font-weight: 600; cursor: pointer; border-radius: 6px;">
-                                    🤖 Latih: Ini Foto AI
-                                </button>
-                                <button type="button" id="btnModalTrainReal" class="btn" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); padding: 6px 12px; font-size: 0.75rem; font-weight: 600; cursor: pointer; border-radius: 6px;">
-                                    📷 Latih: Ini Foto Asli
-                                </button>
-                            </div>
-                            <div id="modalTrainNotice" style="display: none; margin-top: 8px; font-size: 0.75rem; padding: 6px 10px; border-radius: 6px;"></div>
                         </div>
                     </div>
                 </div>

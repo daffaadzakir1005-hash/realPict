@@ -1,0 +1,24 @@
+# Node
+node_modules/
+package-lock.json
+
+# Uploaded files (user data, don't commit)
+uploads/temp_analyzed/*
+uploads/training/*
+
+# Keep the directories themselves
+!uploads/temp_analyzed/.gitkeep
+!uploads/training/.gitkeep
+
+# Backup/dev files
+api/analyze_backup.php
+*.bak
+scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.kiro/

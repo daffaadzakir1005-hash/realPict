@@ -1,0 +1,26 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+package-lock.json
+
+# Dev/scratch files
+scratch/
+
+# Backup files
+api/analyze_backup.php
+*.bak
+
+# Uploaded user files (don't ship local test uploads)
+uploads/temp_analyzed/*
+uploads/training/*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.kiro

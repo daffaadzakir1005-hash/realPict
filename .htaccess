@@ -1,0 +1,42 @@
+# RealPict - Apache Configuration
+Options -Indexes
+
+# PHP settings override (shared hosting fallback)
+<IfModule mod_php.c>
+    php_value upload_max_filesize 20M
+    php_value post_max_size 25M
+    php_value memory_limit 256M
+    php_value max_execution_time 60
+</IfModule>
+
+# Security: block direct access to sensitive directories
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Block access to data directory
+    RewriteRule ^data/ - [F,L]
+
+    # Block access to scratch directory
+    RewriteRule ^scratch/ - [F,L]
+
+    # Block access to backup files
+    RewriteRule \.php\.bak$ - [F,L]
+    RewriteRule _backup\.php$ - [F,L]
+</IfModule>
+
+# Security headers
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+</IfModule>
+
+# Cache static assets
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 week"
+    ExpiresByType application/javascript "access plus 1 week"
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/webp "access plus 1 month"
+</IfModule>

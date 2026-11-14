@@ -1,0 +1,4 @@
+{
+    "hf_token": "",
+    "note": "Kosongkan field ini di production. Set HF_TOKEN sebagai environment variable di Render dashboard. Token dibaca otomatis dari env."
+}

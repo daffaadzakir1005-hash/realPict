@@ -116,8 +116,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // ---------------------------------------------------------
     // 3. Cek Foto (Single Check) Logic
     // ---------------------------------------------------------
-    let currentSingleData = null;
-    let currentModalBatchItem = null;
     const singleDropzone = document.getElementById('singleDropzone');
     const singleFileInput = document.getElementById('singleFileInput');
     const singleScanOverlay = document.getElementById('singleScanOverlay');
@@ -153,10 +151,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const scanSteps = [
-        "Membaca struktur biner file...",
-        "Menganalisis pola distribusi piksel & histogram...",
-        "Memeriksa keaslian metadata EXIF & header kamera...",
-        "Memeriksa artefak kompresi & noise optik sensor...",
+        "Membaca struktur biner file gambar...",
+        "Menghubungi model AI Hugging Face (Vision Classifier)...",
+        "Menganalisis pola distribusi piksel & artefak difusi...",
+        "Memeriksa keaslian metadata EXIF & header sensor kamera...",
         "Mengalkulasi skor probabilitas AI vs RealPic..."
     ];
 
@@ -220,10 +218,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function displaySingleResult(data, previewUrl) {
-        currentSingleData = data;
-        const quickTrainNotice = document.getElementById('quickTrainNotice');
-        if (quickTrainNotice) quickTrainNotice.style.display = 'none';
-
         singleResultCard.style.display = 'block';
         singleDropzone.style.display = 'none';
 
@@ -493,10 +487,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const isAi = data.ai_percentage > 50;
         const badgeColor = data.status_type === 'real' ? '#34d399' : (isAi ? '#f87171' : '#fbbf24');
         const badgeBg = data.status_type === 'real' ? 'rgba(16, 185, 129, 0.15)' : (isAi ? 'rgba(239, 68, 68, 0.15)' : 'rgba(245, 158, 11, 0.15)');
+        const existingImg = row.querySelector('img');
+        const imgSrc = existingImg ? existingImg.src : '';
+        const shortStatus = (data.status_label || 'TERINDIKASI').split(' ')[0];
 
         row.innerHTML = `
             <td style="width: 60px;">
-                <img src="${row.querySelector('img').src}" class="batch-thumb" alt="preview" style="cursor: pointer;" onclick="window.viewBatchDetail(${index})">
+                <img src="${imgSrc}" class="batch-thumb" alt="preview" style="cursor: pointer;" onclick="window.viewBatchDetail(${index})">
             </td>
             <td>
                 <div style="font-weight: 600; color: #fff;">${data.file_name}</div>
@@ -513,7 +510,7 @@ document.addEventListener('DOMContentLoaded', () => {
             </td>
             <td style="width: 140px; text-align: center;">
                 <span style="background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeColor}40; padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700; display: inline-block;">
-                    ${data.status_label.split(' ')[0]}
+                    ${shortStatus}
                 </span>
             </td>
             <td style="width: 130px; text-align: right;">
@@ -528,9 +525,6 @@ document.addEventListener('DOMContentLoaded', () => {
     window.viewBatchDetail = function(index) {
         const item = batchItems[index];
         if (!item || !batchDetailModal) return;
-        currentModalBatchItem = item;
-        const modalTrainNotice = document.getElementById('modalTrainNotice');
-        if (modalTrainNotice) modalTrainNotice.style.display = 'none';
 
         const data = item.data;
 
@@ -769,394 +763,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadRecentReports();
 
     // ---------------------------------------------------------
-    // 6. Quick Training Controller (from Cek Foto & Batch Modal)
-    // ---------------------------------------------------------
-    function quickTrainSingle(label) {
-        if (!currentSingleData) return;
-        const noticeEl = document.getElementById('quickTrainNotice');
-        if (!noticeEl) return;
-
-        noticeEl.style.display = 'block';
-        noticeEl.style.background = 'rgba(59, 130, 246, 0.15)';
-        noticeEl.style.color = '#60a5fa';
-        noticeEl.style.border = '1px solid rgba(59, 130, 246, 0.3)';
-        noticeEl.innerHTML = 'Menyimpan karakteristik foto ke dataset pelatihan model...';
-
-        const formData = new FormData();
-        formData.append('label', label);
-        formData.append('file_name', currentSingleData.file_name);
-        if (currentSingleData.temp_file_path) {
-            formData.append('file_path', currentSingleData.temp_file_path);
-        }
-        formData.append('source_notes', 'Pelatihan Cepat dari Cek Foto (' + (label === 'ai' ? 'Foto AI' : 'Foto Asli') + ')');
-
-        fetch('api/train.php', { method: 'POST', body: formData })
-            .then(r => r.json())
-            .then(res => {
-                if (res.status === 'success') {
-                    noticeEl.style.background = label === 'ai' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)';
-                    noticeEl.style.color = label === 'ai' ? '#f87171' : '#34d399';
-                    noticeEl.style.border = label === 'ai' ? '1px solid rgba(239, 68, 68, 0.35)' : '1px solid rgba(16, 185, 129, 0.35)';
-                    noticeEl.innerHTML = `✓ Berhasil! Model telah dilatih bahwa foto ini adalah <strong>${label === 'ai' ? 'FOTO AI' : 'FOTO ASLI'}</strong>. Karakteristik disimpan ke memori deteksi!`;
-                    showToast(`Foto berhasil dilatih sebagai ${label === 'ai' ? 'FOTO AI' : 'FOTO ASLI'}!`, 'success');
-                    loadTrainingDataset();
-                } else {
-                    noticeEl.style.color = '#ef4444';
-                    noticeEl.textContent = res.message || 'Gagal menyimpan pelatihan.';
-                }
-            })
-            .catch(() => {
-                noticeEl.style.color = '#ef4444';
-                noticeEl.textContent = 'Terjadi kesalahan saat menghubungkan ke server pelatihan.';
-            });
-    }
-
-    const btnQuickTrainAi = document.getElementById('btnQuickTrainAi');
-    const btnQuickTrainReal = document.getElementById('btnQuickTrainReal');
-    if (btnQuickTrainAi) btnQuickTrainAi.addEventListener('click', () => quickTrainSingle('ai'));
-    if (btnQuickTrainReal) btnQuickTrainReal.addEventListener('click', () => quickTrainSingle('real'));
-
-    function quickTrainModal(label) {
-        if (!currentModalBatchItem) return;
-        const noticeEl = document.getElementById('modalTrainNotice');
-        if (!noticeEl) return;
-
-        noticeEl.style.display = 'block';
-        noticeEl.style.background = 'rgba(59, 130, 246, 0.15)';
-        noticeEl.style.color = '#60a5fa';
-        noticeEl.style.border = '1px solid rgba(59, 130, 246, 0.3)';
-        noticeEl.textContent = 'Menyimpan karakteristik ke model...';
-
-        const formData = new FormData();
-        formData.append('label', label);
-        formData.append('file_name', currentModalBatchItem.data.file_name);
-        if (currentModalBatchItem.data.temp_file_path) {
-            formData.append('file_path', currentModalBatchItem.data.temp_file_path);
-        }
-        formData.append('source_notes', 'Pelatihan Cepat dari Batch Audit (' + (label === 'ai' ? 'Foto AI' : 'Foto Asli') + ')');
-
-        fetch('api/train.php', { method: 'POST', body: formData })
-            .then(r => r.json())
-            .then(res => {
-                if (res.status === 'success') {
-                    noticeEl.style.background = label === 'ai' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)';
-                    noticeEl.style.color = label === 'ai' ? '#f87171' : '#34d399';
-                    noticeEl.style.border = label === 'ai' ? '1px solid rgba(239, 68, 68, 0.35)' : '1px solid rgba(16, 185, 129, 0.35)';
-                    noticeEl.innerHTML = `✓ Berhasil! Model mengingat foto ini sebagai <strong>${label === 'ai' ? 'FOTO AI' : 'FOTO ASLI'}</strong>.`;
-                    showToast(`Foto berhasil dilatih sebagai ${label === 'ai' ? 'FOTO AI' : 'FOTO ASLI'}!`, 'success');
-                    loadTrainingDataset();
-                } else {
-                    noticeEl.style.color = '#ef4444';
-                    noticeEl.textContent = res.message || 'Gagal menyimpan pelatihan.';
-                }
-            })
-            .catch(() => {
-                noticeEl.style.color = '#ef4444';
-                noticeEl.textContent = 'Terjadi kesalahan jaringan saat menyimpan pelatihan.';
-            });
-    }
-
-    const btnModalTrainAi = document.getElementById('btnModalTrainAi');
-    const btnModalTrainReal = document.getElementById('btnModalTrainReal');
-    if (btnModalTrainAi) btnModalTrainAi.addEventListener('click', () => quickTrainModal('ai'));
-    if (btnModalTrainReal) btnModalTrainReal.addEventListener('click', () => quickTrainModal('real'));
-
-    // ---------------------------------------------------------
-    // 7. Training AI Page Controller
-    // ---------------------------------------------------------
-    const radioLabelAi = document.getElementById('radioLabelAi');
-    const radioLabelReal = document.getElementById('radioLabelReal');
-    const cardLabelAi = document.getElementById('cardLabelAi');
-    const cardLabelReal = document.getElementById('cardLabelReal');
-    const trainDropzone = document.getElementById('trainDropzone');
-    const trainFileInput = document.getElementById('trainFileInput');
-    const trainFilesSelectedList = document.getElementById('trainFilesSelectedList');
-    const trainDropzoneTitle = document.getElementById('trainDropzoneTitle');
-    const formTraining = document.getElementById('formTraining');
-    const btnSubmitTraining = document.getElementById('btnSubmitTraining');
-    const btnRefreshDataset = document.getElementById('btnRefreshDataset');
-    const datasetTableContainer = document.getElementById('datasetTableContainer');
-
-    // Label toggle card styling
-    if (radioLabelAi && radioLabelReal && cardLabelAi && cardLabelReal) {
-        radioLabelAi.addEventListener('change', () => {
-            if (radioLabelAi.checked) {
-                cardLabelAi.style.border = '2px solid #ef4444';
-                cardLabelAi.style.background = 'rgba(239, 68, 68, 0.08)';
-                cardLabelReal.style.border = '2px solid #334155';
-                cardLabelReal.style.background = '#0f1218';
-            }
-        });
-
-        radioLabelReal.addEventListener('change', () => {
-            if (radioLabelReal.checked) {
-                cardLabelReal.style.border = '2px solid #10b981';
-                cardLabelReal.style.background = 'rgba(16, 185, 129, 0.08)';
-                cardLabelAi.style.border = '2px solid #334155';
-                cardLabelAi.style.background = '#0f1218';
-            }
-        });
-    }
-
-    // Training file picker and drag-drop
-    let trainingSelectedFiles = [];
-
-    if (trainDropzone && trainFileInput) {
-        trainDropzone.addEventListener('click', () => trainFileInput.click());
-
-        trainDropzone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            trainDropzone.classList.add('dragover');
-        });
-
-        trainDropzone.addEventListener('dragleave', () => {
-            trainDropzone.classList.remove('dragover');
-        });
-
-        trainDropzone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            trainDropzone.classList.remove('dragover');
-            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                handleTrainingFilesSelected(Array.from(e.dataTransfer.files));
-            }
-        });
-
-        trainFileInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files.length > 0) {
-                handleTrainingFilesSelected(Array.from(e.target.files));
-            }
-        });
-    }
-
-    function handleTrainingFilesSelected(files) {
-        const validFiles = files.filter(f => ['image/jpeg', 'image/png', 'image/webp'].includes(f.type));
-        if (validFiles.length === 0) {
-            showToast('Pilih file gambar berformat JPG, PNG, atau WEBP.', 'error');
-            return;
-        }
-
-        trainingSelectedFiles = validFiles;
-        renderTrainingFilesList();
-    }
-
-    function renderTrainingFilesList() {
-        if (!trainFilesSelectedList) return;
-
-        if (trainingSelectedFiles.length === 0) {
-            trainFilesSelectedList.style.display = 'none';
-            trainFilesSelectedList.innerHTML = '';
-            if (trainDropzoneTitle) trainDropzoneTitle.textContent = 'Pilih satu atau beberapa foto untuk dilatih';
-            return;
-        }
-
-        trainFilesSelectedList.style.display = 'block';
-        if (trainDropzoneTitle) trainDropzoneTitle.textContent = `${trainingSelectedFiles.length} foto siap dilatih`;
-
-        let html = `
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="font-size: 0.8rem; font-weight: 700; color: #fff;">${trainingSelectedFiles.length} File Dipilih:</span>
-                <button type="button" onclick="window.clearTrainingFiles()" style="background: none; border: none; color: #ef4444; font-size: 0.75rem; cursor: pointer; text-decoration: underline;">Kosongkan</button>
-            </div>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap; max-height: 120px; overflow-y: auto;">
-        `;
-
-        trainingSelectedFiles.forEach((file, idx) => {
-            html += `
-                <span style="background: #1c212c; color: #cbd5e1; font-size: 0.75rem; padding: 4px 10px; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px;">
-                    📷 ${file.name} (${(file.size / 1024).toFixed(0)} KB)
-                </span>
-            `;
-        });
-
-        html += `</div>`;
-        trainFilesSelectedList.innerHTML = html;
-    }
-
-    window.clearTrainingFiles = function() {
-        trainingSelectedFiles = [];
-        if (trainFileInput) trainFileInput.value = '';
-        renderTrainingFilesList();
-    };
-
-    // Submit Training Form
-    if (formTraining) {
-        formTraining.addEventListener('submit', (e) => {
-            e.preventDefault();
-
-            if (trainingSelectedFiles.length === 0) {
-                showToast('Pilih setidaknya satu file gambar untuk dilatih.', 'error');
-                return;
-            }
-
-            const label = radioLabelReal && radioLabelReal.checked ? 'real' : 'ai';
-            const notes = document.getElementById('trainSourceNotes') ? document.getElementById('trainSourceNotes').value.trim() : '';
-
-            const formData = new FormData();
-            formData.append('label', label);
-            formData.append('source_notes', notes);
-
-            trainingSelectedFiles.forEach(file => {
-                formData.append('images[]', file);
-            });
-
-            btnSubmitTraining.disabled = true;
-            btnSubmitTraining.innerHTML = '🧠 Sedang Mengekstrak Pola & Melatih Model...';
-
-            fetch('api/train.php', {
-                method: 'POST',
-                body: formData
-            })
-                .then(r => r.json())
-                .then(data => {
-                    btnSubmitTraining.disabled = false;
-                    btnSubmitTraining.innerHTML = '🧠 Mulai Training & Simpan ke Model';
-
-                    if (data.status === 'success') {
-                        showToast(data.message, 'success');
-                        window.clearTrainingFiles();
-                        if (document.getElementById('trainSourceNotes')) {
-                            document.getElementById('trainSourceNotes').value = '';
-                        }
-                        loadTrainingDataset();
-                    } else {
-                        showToast(data.message || 'Gagal melatih foto.', 'error');
-                    }
-                })
-                .catch(() => {
-                    btnSubmitTraining.disabled = false;
-                    btnSubmitTraining.innerHTML = '🧠 Mulai Training & Simpan ke Model';
-                    showToast('Terjadi kesalahan jaringan saat mengirim data pelatihan.', 'error');
-                });
-        });
-    }
-
-    // Load dataset and stats
-    function loadTrainingDataset() {
-        if (!datasetTableContainer) return;
-
-        fetch('api/train.php')
-            .then(r => r.json())
-            .then(res => {
-                if (res.status === 'success') {
-                    // Update stats
-                    const statTotal = document.getElementById('trnStatTotal');
-                    const statAi = document.getElementById('trnStatAi');
-                    const statReal = document.getElementById('trnStatReal');
-
-                    if (statTotal) statTotal.textContent = res.stats.total;
-                    if (statAi) statAi.textContent = res.stats.ai_count;
-                    if (statReal) statReal.textContent = res.stats.real_count;
-
-                    // Render table
-                    if (res.data.length === 0) {
-                        datasetTableContainer.innerHTML = `
-                            <div style="text-align: center; padding: 32px; color: #64748b; font-size: 0.85rem;">
-                                Belum ada sampel foto yang dilatih. Unggah foto di formulir atas untuk memulai melatih model.
-                            </div>
-                        `;
-                        return;
-                    }
-
-                    let tableHtml = `
-                        <div style="overflow-x: auto;">
-                            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem;">
-                                <thead>
-                                    <tr style="border-bottom: 1px solid #1c212c; color: #64748b; font-size: 0.75rem; text-transform: uppercase;">
-                                        <th style="padding: 12px 16px;">Foto</th>
-                                        <th style="padding: 12px 16px;">Nama & Dimensi</th>
-                                        <th style="padding: 12px 16px;">Label Model</th>
-                                        <th style="padding: 12px 16px;">Sumber / Keterangan</th>
-                                        <th style="padding: 12px 16px;">Waktu Latih</th>
-                                        <th style="padding: 12px 16px; text-align: right;">Aksi</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                    `;
-
-                    res.data.forEach(item => {
-                        const isAi = item.label === 'ai';
-                        const badgeColor = isAi ? '#f87171' : '#34d399';
-                        const badgeBg = isAi ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)';
-                        const badgeBorder = isAi ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)';
-                        const badgeText = isAi ? '🤖 FOTO AI' : '📷 FOTO ASLI';
-
-                        const thumbSrc = item.image_url || '';
-                        const dimText = item.fingerprint ? `${item.fingerprint.width} × ${item.fingerprint.height} px` : '-';
-                        const sizeText = item.fingerprint ? `${(item.fingerprint.size / 1024).toFixed(1)} KB` : '';
-
-                        tableHtml += `
-                            <tr style="border-bottom: 1px solid #141822;">
-                                <td style="padding: 12px 16px; width: 60px;">
-                                    ${thumbSrc ? `<img src="${thumbSrc}" style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; border: 1px solid #1c212c;" alt="thumb">` : `<div style="width: 44px; height: 44px; background: #1c212c; border-radius: 8px; display: flex; align-items: center; justify-content: center;">📷</div>`}
-                                </td>
-                                <td style="padding: 12px 16px;">
-                                    <div style="font-weight: 600; color: #fff;">${item.file_name}</div>
-                                    <div style="font-size: 0.75rem; color: #64748b;">${dimText} · ${sizeText}</div>
-                                </td>
-                                <td style="padding: 12px 16px;">
-                                    <span style="background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 700;">
-                                        ${badgeText}
-                                    </span>
-                                </td>
-                                <td style="padding: 12px 16px; color: #94a3b8; font-size: 0.8rem;">
-                                    ${item.source_notes || '-'}
-                                </td>
-                                <td style="padding: 12px 16px; color: #64748b; font-size: 0.75rem;">
-                                    ${item.date_formatted || item.created_at}
-                                </td>
-                                <td style="padding: 12px 16px; text-align: right;">
-                                    <button type="button" onclick="window.deleteTrainingSample('${item.id}')" style="background: rgba(239, 68, 68, 0.1); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25); padding: 5px 10px; border-radius: 6px; font-size: 0.75rem; cursor: pointer;">
-                                        ✕ Hapus
-                                    </button>
-                                </td>
-                            </tr>
-                        `;
-                    });
-
-                    tableHtml += `
-                                </tbody>
-                            </table>
-                        </div>
-                    `;
-
-                    datasetTableContainer.innerHTML = tableHtml;
-                }
-            })
-            .catch(() => {
-                datasetTableContainer.innerHTML = '<div style="text-align: center; padding: 20px; color: #ef4444; font-size: 0.85rem;">Gagal memuat dataset pelatihan.</div>';
-            });
-    }
-
-    if (btnRefreshDataset) {
-        btnRefreshDataset.addEventListener('click', () => {
-            loadTrainingDataset();
-            showToast('Dataset pelatihan diperbarui.', 'info');
-        });
-    }
-
-    window.deleteTrainingSample = function(id) {
-        if (!confirm('Yakin ingin menghapus sampel ini dari memori model?')) return;
-
-        fetch(`api/train.php?action=delete&id=${encodeURIComponent(id)}`)
-            .then(r => r.json())
-            .then(res => {
-                if (res.status === 'success') {
-                    showToast('Sampel berhasil dihapus dari model.', 'success');
-                    loadTrainingDataset();
-                } else {
-                    showToast(res.message || 'Gagal menghapus sampel.', 'error');
-                }
-            })
-            .catch(() => {
-                showToast('Terjadi kesalahan jaringan saat menghapus.', 'error');
-            });
-    };
-
-    // Load dataset on initial startup
-    loadTrainingDataset();
-
-    // ---------------------------------------------------------
-    // 8. Toast Notification Helper
+    // 6. Toast Notification Helper
     // ---------------------------------------------------------
     function showToast(message, type = 'info') {
         let toast = document.getElementById('globalToast');
