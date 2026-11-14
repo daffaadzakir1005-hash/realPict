@@ -18,8 +18,10 @@ RUN apt-get update && apt-get install -y \
         exif && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Enable Apache mod_rewrite
-RUN a2enmod rewrite
+# Ensure exactly one Apache MPM (prefork, required by mod_php) is enabled
+RUN a2dismod mpm_event mpm_worker || true && \
+    a2enmod mpm_prefork && \
+    a2enmod rewrite
 
 # Set working directory
 WORKDIR /var/www/html
