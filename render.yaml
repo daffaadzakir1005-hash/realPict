@@ -7,5 +7,4 @@ services:
     envVars:
       - key: HF_TOKEN
         sync: false   # set manually in Render dashboard (keep secret)
-    healthCheckPath: /api/analyze.php
     autoDeploy: true
